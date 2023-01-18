@@ -1,12 +1,11 @@
-﻿using System.Net;
+﻿using FordConnect.Helpers;
 using FordConnect.Models;
 using FordConnect.Services.Cryptography;
 using HtmlAgilityPack;
 using Newtonsoft.Json;
-using Newtonsoft.Json.Serialization;
 using RestSharp;
+using System.Net;
 using System.Web;
-using FordConnect.Helpers;
 
 namespace FordConnect.Services;
 
@@ -28,6 +27,16 @@ internal class FordAuth
         var pkce = PKCE.Generate();
         var (code, grantId) = AttemptLogin(pkce.CodeChallenge, username, password);
 
+        var response = Authenticate(code, grantId, pkce);
+        if (response.Content != null)
+        {
+            return GetAuthorizationToken(response.Content);
+        }
+        return null;
+    }
+
+    private RestResponse Authenticate(string code, string grantId, ChallengeAndVerifierModel pkce)
+    {
         var request = new RestRequest("oidc/endpoint/default/token");
 
         request.AddQueryParameter("client_id", clientId);
@@ -41,17 +50,12 @@ internal class FordAuth
         request.AddHeader("Content-Type", "application/x-www-form-urlencoded");
 
         var response = client.Execute(request, Method.Post);
-        if (response.Content != null)
-        {
-            return GetAuthorizationToken(response.Content);
-        }
-        return null;
+        return response;
     }
 
     private AuthorizationToken? GetAuthorizationToken(string content)
     {
-        var jsonSerializerSettings = GetJsonSerializerSettings();
-        var token = JsonConvert.DeserializeObject<AuthenticationToken>(content, jsonSerializerSettings);
+        var token = JsonConvert.DeserializeObject<AuthenticationToken>(content);
 
         var newClient = new RestClient("https://api.mps.ford.com");
         var newRequest = new RestRequest("api/token/v2/cat-with-ci-access-token", Method.Post);
@@ -63,7 +67,7 @@ internal class FordAuth
         var newResponse = newClient.Execute(newRequest);
         if (newResponse.StatusCode == HttpStatusCode.OK && newResponse.Content != null)
         {
-            var result = JsonConvert.DeserializeObject<AuthorizationToken>(newResponse.Content, jsonSerializerSettings);
+            var result = JsonConvert.DeserializeObject<AuthorizationToken>(newResponse.Content);
             return result;
         }
 
@@ -84,17 +88,21 @@ internal class FordAuth
         AddDefaultHeaders(request);
 
         var response = client.Execute(request);
-        var redirectUrl = response.Headers?.First(x => x.Name == "Location").Value?.ToString();
-        if (!string.IsNullOrEmpty(redirectUrl))
+        if (response.StatusCode == HttpStatusCode.Found)
         {
-            var myUri = new Uri(redirectUrl);
-            var code = HttpUtility.ParseQueryString(myUri.Query).Get("code");
-            var grantId = HttpUtility.ParseQueryString(myUri.Query).Get("grant_id");
-            if (!string.IsNullOrEmpty(code) && !string.IsNullOrEmpty(grantId))
+            var redirectUrl = response.Headers?.First(x => x.Name == "Location").Value?.ToString();
+            if (!string.IsNullOrEmpty(redirectUrl))
             {
-                return (code, grantId);
+                var myUri = new Uri(redirectUrl);
+                var code = HttpUtility.ParseQueryString(myUri.Query).Get("code");
+                var grantId = HttpUtility.ParseQueryString(myUri.Query).Get("grant_id");
+                if (!string.IsNullOrEmpty(code) && !string.IsNullOrEmpty(grantId))
+                {
+                    return (code, grantId);
+                }
             }
         }
+
         throw new Exception("Failed to login");
     }
 
@@ -128,19 +136,5 @@ internal class FordAuth
         request.AddHeader("Accept", "*/*");
         request.AddHeader("User-Agent", "FordPass/24 CFNetwork/1399 Darwin/22.1.0");
         request.AddHeader("Accept-Encoding", "gzip, deflate, br");
-    }
-
-    private static JsonSerializerSettings GetJsonSerializerSettings()
-    {
-        var contractResolver = new DefaultContractResolver
-        {
-            NamingStrategy = new SnakeCaseNamingStrategy()
-        };
-        var jsonSerializerSettings = new JsonSerializerSettings
-        {
-            ContractResolver = contractResolver,
-            Formatting = Formatting.Indented
-        };
-        return jsonSerializerSettings;
     }
 }
